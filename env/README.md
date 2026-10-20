@@ -5,3 +5,5 @@
 看板地址配置的变量含义和使用规则只见 [`技术实现第 9.3 节`](../reference/DESIGN/ap01-1.0.2_0031-opt.bin技术实现/ap01-1.0.2_0031-opt.bin技术实现.md#93-地址配置与两种固件)。 `agents-dashboard.env.example` 是空白格式，`agents-dashboard.env` 保存本机实际数据并被版本控制忽略。
 
 小米云官方固件查询可使用 `mi-cloud.env.example` 复制出 `mi-cloud.env`。该文件保存本机登录态，只供 `official-firmware-info` 和 `official-firmware-download` 使用，并被版本控制忽略。
+
+只读对象树观察固件使用 `dark-skin-observer.env.example` 复制出 `dark-skin-observer.env`，只填写 `AP01_OBSERVER_URL_PREFIX`。实际局域网地址只在构建时注入，不提交到仓库，也不写入构建清单。

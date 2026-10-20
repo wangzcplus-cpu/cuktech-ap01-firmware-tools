@@ -36,6 +36,7 @@
 | `features/agents_dashboard/assets/icons/` | 提供看板图标，必须保留许可说明。 |
 | [`knowledge/Codex-模型API计费表.md`](../knowledge/Codex-模型API计费表.md) | 计算当日会话费用，必须与计费实现和自动测试一致。 |
 | `env/agents-dashboard.env` | 记录 1～10 个局域网服务地址和共用端口；从示例文件复制，被 Git 忽略，文件权限为 `0600`；填写规则只见[技术实现第 9.3 节](DESIGN/ap01-1.0.2_0031-opt.bin技术实现/ap01-1.0.2_0031-opt.bin技术实现.md#93-地址配置与两种固件)。 |
+| `env/dark-skin-observer.env` | 记录只读对象树观察接收地址；从 `dark-skin-observer.env.example` 复制，填写 `AP01_OBSERVER_URL_PREFIX`，被 Git 忽略且不得写入构建清单。 |
 | `env/mi-cloud.env` | 可选；由扫码登录命令自动创建或更新，保存本机小米云查询官方固件所需账号字段，被 Git 忽略，文件权限为 `0600`。 |
 | `artifacts/official-firmware/xiaomi-login-qr.png` | 扫码登录命令生成的临时二维码；只供当前登录使用，位于项目内，不得提交。 |
 | `~/Library/Application Support/Cuktech/AP01/firmware/` | 保存个人固件、制作记录和页面操作模拟报告，当前用户必须可写。 |
