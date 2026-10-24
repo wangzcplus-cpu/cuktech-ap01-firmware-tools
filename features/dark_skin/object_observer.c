@@ -12,6 +12,7 @@ typedef signed int i32;
 #define LOOP_GLOBAL 0x62FCA9A8u
 #define MAX_OBJECTS 64u
 #define MAX_DEPTH 6u
+#define MAX_PERSISTENT_BYTES 192u
 #define HTTP_CONTEXT_BYTES 116u
 #define HTTP_RESPONSE_BYTES 4096u
 #define HTTP_URL_BYTES 352u
@@ -76,12 +77,20 @@ struct observer_state {
   i32 page;
   i32 last_page;
   u32 last_fingerprint;
+  u32 root;
   u32 count;
   u32 next;
   u32 active;
   u32 truncated;
-  struct record records[MAX_OBJECTS];
+  u32 probe_sent;
+  u8 depth;
+  u8 path[MAX_DEPTH];
+  u8 reserved;
 };
+
+typedef char observer_state_must_remain_small[
+  TIMER_BYTES + sizeof(struct observer_state) <= MAX_PERSISTENT_BYTES ? 1 : -1
+];
 
 static const char http_method[] = "GET";
 static const char url_prefix[] = AP01_OBSERVER_URL_PREFIX;
@@ -186,19 +195,45 @@ static ATTR_NOINLINE struct observer_state *ensure_state(void)
   return state;
 }
 
-static void collect_object(struct observer_state *state, void *object, u8 depth, u8 *path)
+static void count_objects(void *object, u8 depth, u32 *count, u32 *truncated)
 {
-  struct record *record;
   u32 children;
   u32 index;
-  u8 *bytes;
-  if (object == (void *)0 || depth > MAX_DEPTH || state->count >= MAX_OBJECTS) {
-    state->truncated = 1u;
+  if (object == (void *)0) return;
+  if (*count >= MAX_OBJECTS) {
+    *truncated = 1u;
     return;
   }
-  bytes = (u8 *)object;
+  ++*count;
   children = ((child_count_fn)lv_obj_get_child_count)(object);
-  record = &state->records[state->count++];
+  if (depth == MAX_DEPTH) {
+    if (children != 0u) *truncated = 1u;
+    return;
+  }
+  for (index = 0u; index < children; ++index) {
+    if (index > 255u || *count >= MAX_OBJECTS) {
+      *truncated = 1u;
+      return;
+    }
+    count_objects(((child_fn)lv_obj_get_child)(object, (int)index),
+                  (u8)(depth + 1u), count, truncated);
+  }
+}
+
+static void *resolve_object(void *root, const u8 *path, u8 depth)
+{
+  void *object = root;
+  u8 index;
+  for (index = 0u; index < depth && object != (void *)0; ++index)
+    object = ((child_fn)lv_obj_get_child)(object, (int)path[index]);
+  return object;
+}
+
+static void fill_record(struct record *record, void *object, u8 depth, const u8 *path)
+{
+  u8 *bytes = (u8 *)object;
+  u32 index;
+  zero_bytes(record, (u32)sizeof(*record));
   record->object = (u32)object;
   record->class_pointer = *(u32 *)(bytes + 0u);
   record->flags = *(u32 *)(bytes + 8u);
@@ -208,21 +243,36 @@ static void collect_object(struct observer_state *state, void *object, u8 depth,
   record->y1 = *(i32 *)(bytes + 24u);
   record->x2 = *(i32 *)(bytes + 28u);
   record->y2 = *(i32 *)(bytes + 32u);
-  record->child_count = children;
+  record->child_count = ((child_count_fn)lv_obj_get_child_count)(object);
   record->depth = depth;
   for (index = 0u; index < MAX_DEPTH; ++index) record->path[index] = path[index];
-  if (depth == MAX_DEPTH) {
-    if (children != 0u) state->truncated = 1u;
-    return;
+}
+
+static int advance_path(void *root, u8 *path, u8 *depth)
+{
+  void *object = resolve_object(root, path, *depth);
+  u32 children;
+  u8 selected;
+  if (object == (void *)0) return 0;
+  children = ((child_count_fn)lv_obj_get_child_count)(object);
+  if (*depth < MAX_DEPTH && children != 0u) {
+    path[*depth] = 0u;
+    ++*depth;
+    return 1;
   }
-  for (index = 0u; index < children; ++index) {
-    if (index > 255u || state->count >= MAX_OBJECTS) {
-      state->truncated = 1u;
-      return;
+  while (*depth != 0u) {
+    selected = (u8)(*depth - 1u);
+    object = resolve_object(root, path, selected);
+    if (object == (void *)0) return 0;
+    children = ((child_count_fn)lv_obj_get_child_count)(object);
+    if ((u32)path[selected] + 1u < children && path[selected] != 255u) {
+      ++path[selected];
+      return 1;
     }
-    path[depth] = (u8)index;
-    collect_object(state, ((child_fn)lv_obj_get_child)(object, (int)index), (u8)(depth + 1u), path);
+    path[selected] = 0u;
+    --*depth;
   }
+  return 0;
 }
 
 static ATTR_NOINLINE int discard_response_sink(char **buffer, int offset,
@@ -282,7 +332,7 @@ static ATTR_NOINLINE int send_record(struct observer_state *state, struct record
   *(void **)(context + HTTP_BUFFER_OFFSET) = response;
   *(u32 *)(context + HTTP_BUFFER_SIZE_OFFSET) = HTTP_RESPONSE_BYTES;
   *(void **)(context + HTTP_SINK_OFFSET) = (void *)discard_response_sink;
-  *(void **)(context + HTTP_SINK_ARG_OFFSET) = (void *)0;
+  *(void **)(context + HTTP_SINK_ARG_OFFSET) = (void *)record;
   context[HTTP_READY_OFFSET] = 1u;
   result = ((webclient_fn)webclient_perform)(context);
   if (result >= 0 && *(u32 *)(context + HTTP_STATUS_OFFSET) != 200u) result = -1;
@@ -296,17 +346,41 @@ static ATTR_NOINLINE int send_record(struct observer_state *state, struct record
 ATTR_NOINLINE __attribute__((used)) void ap01_dark_skin_observer_timer(void *handle)
 {
   struct observer_state *state;
+  struct record record;
+  void *object;
+  i32 saved_page;
+  u32 saved_count;
+  u32 saved_truncated;
   u32 delay = IDLE_DELAY_MS;
   if (handle == (void *)0) return;
   state = (struct observer_state *)((u8 *)handle + TIMER_BYTES);
-  if (state->active != 0u && state->next < state->count) {
-    if (send_record(state, &state->records[state->next], state->next) < 0) {
+  if (state->probe_sent == 0u) {
+    zero_bytes(&record, (u32)sizeof(record));
+    saved_page = state->page;
+    saved_count = state->count;
+    saved_truncated = state->truncated;
+    state->page = -1;
+    state->count = 0u;
+    state->truncated = 0u;
+    if (send_record(state, &record, 0u) >= 0) state->probe_sent = 1u;
+    state->page = saved_page;
+    state->count = saved_count;
+    state->truncated = saved_truncated;
+  } else if (state->active != 0u && state->next < state->count) {
+    object = resolve_object((void *)state->root, state->path, state->depth);
+    if (object == (void *)0) {
       state->active = 0u;
-      state->count = 0u;
     } else {
-      ++state->next;
-      if (state->next < state->count) delay = ACTIVE_DELAY_MS;
-      else { state->active = 0u; state->count = 0u; }
+      fill_record(&record, object, state->depth, state->path);
+      if (send_record(state, &record, state->next) < 0) {
+        state->active = 0u;
+      } else {
+        ++state->next;
+        if (state->next < state->count &&
+            advance_path((void *)state->root, state->path, &state->depth))
+          delay = ACTIVE_DELAY_MS;
+        else state->active = 0u;
+      }
     }
   }
   (void)((timer_schedule_fn)stock_timer_schedule)(handle, (void *)ap01_dark_skin_observer_timer, delay, 0u, 0u, 0u);
@@ -319,11 +393,9 @@ ATTR_ENTRY void ap01_dark_skin_ui_timer_wrapper(void *timer)
   void *root;
   i32 page;
   u32 fingerprint;
-  u8 path[MAX_DEPTH];
-  ((one_arg_fn)stock_ui_timer)(timer);
-  if (timer == (void *)0) return;
   state = ensure_state();
-  if (state == (void *)0 || state->active != 0u) return;
+  ((one_arg_fn)stock_ui_timer)(timer);
+  if (timer == (void *)0 || state == (void *)0) return;
   theme = *(void **)((u8 *)timer + 12u);
   if (theme == (void *)0) return;
   page = ((dispatch_fn)stock_get_dispatch_index)(theme);
@@ -332,15 +404,17 @@ ATTR_ENTRY void ap01_dark_skin_ui_timer_wrapper(void *timer)
   if (root == (void *)0) return;
   fingerprint = (u32)root ^ *(u32 *)root ^ ((child_count_fn)lv_obj_get_child_count)(root);
   if (state->last_page == page && state->last_fingerprint == fingerprint) return;
-  zero_bytes(path, MAX_DEPTH);
   state->page = page;
   state->count = 0u;
   state->next = 0u;
   state->truncated = 0u;
-  collect_object(state, root, 0u, path);
+  count_objects(root, 0u, &state->count, &state->truncated);
   if (state->count == 0u) return;
   ++state->sequence;
   state->fingerprint = fingerprint;
+  state->root = (u32)root;
+  state->depth = 0u;
+  zero_bytes(state->path, MAX_DEPTH);
   state->last_page = page;
   state->last_fingerprint = fingerprint;
   state->active = 1u;

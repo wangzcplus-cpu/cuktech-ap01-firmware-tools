@@ -207,10 +207,10 @@ def build(
         raise ObserverBuildError("观察载荷仍有未处理重定位")
     wrapper = disassembly.split("<ap01_dark_skin_ui_timer_wrapper>:", 1)[1]
     wrapper = wrapper.split("\n\n", 1)[0]
-    stock_position = wrapper.find("<stock_ui_timer>")
     ensure_position = wrapper.find("<ensure_state>")
-    if stock_position < 0 or ensure_position < 0 or stock_position > ensure_position:
-        raise ObserverBuildError("包装函数没有先调用原厂 UI 定时函数")
+    stock_position = wrapper.find("<stock_ui_timer>")
+    if stock_position < 0 or ensure_position < 0 or ensure_position > stock_position:
+        raise ObserverBuildError("包装函数没有先确保独立观察定时器，再调用原厂 UI 定时函数")
     source_text = SOURCE.read_text(encoding="utf-8")
     forbidden = (
         "lv_obj_create", "lv_obj_del", "lv_obj_set_", "lv_obj_add_event_cb",
@@ -218,12 +218,25 @@ def build(
     )
     if any(name in source_text for name in forbidden):
         raise ObserverBuildError("观察源码包含改变对象的 LVGL 调用")
+    if "struct record records[MAX_OBJECTS]" in source_text:
+        raise ObserverBuildError("观察状态仍包含完整对象记录数组")
+    required_incremental_contract = (
+        "#define MAX_PERSISTENT_BYTES 192u",
+        "observer_state_must_remain_small",
+        "TIMER_BYTES + sizeof(struct observer_state) <= MAX_PERSISTENT_BYTES",
+        "state->probe_sent == 0u",
+        "state->page = -1",
+        "resolve_object((void *)state->root",
+        "advance_path((void *)state->root",
+    )
+    if any(item not in source_text for item in required_incremental_contract):
+        raise ObserverBuildError("观察程序缺少低内存增量遍历或启动探针")
     required_webclient_contract = (
         "#define HTTP_RESPONSE_BYTES 4096u",
         "#define HTTP_SINK_OFFSET 60u",
         "#define HTTP_SINK_ARG_OFFSET 64u",
         "(void *)discard_response_sink",
-        "context + HTTP_SINK_ARG_OFFSET",
+        "context + HTTP_SINK_ARG_OFFSET) = (void *)record",
     )
     if any(item not in source_text for item in required_webclient_contract):
         raise ObserverBuildError("观察程序没有完整复用原厂 webclient 上下文")
@@ -281,11 +294,15 @@ def build(
             "read_only": freeze,
         },
         "safety": {
-            "stock_ui_timer_called_first": True,
+            "observer_timer_ensured_before_stock_ui_timer": True,
             "object_mutation_calls_absent": True,
             "network_timeout_seconds": 2,
             "maximum_objects": 64,
             "maximum_depth": 6,
+            "maximum_timer_and_state_bytes": 192,
+            "full_record_array_absent": True,
+            "startup_probe_page": -1,
+            "incremental_object_send": True,
             "installation_authorized": False,
             "receiver_address_stored_in_manifest": False,
             "webclient_response_buffer_bytes": 4096,
