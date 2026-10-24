@@ -13,15 +13,19 @@ typedef signed int i32;
 #define MAX_OBJECTS 64u
 #define MAX_DEPTH 6u
 #define HTTP_CONTEXT_BYTES 116u
-#define HTTP_RESPONSE_BYTES 64u
+#define HTTP_RESPONSE_BYTES 4096u
 #define HTTP_URL_BYTES 352u
 #define HTTP_URL_OFFSET 8u
 #define HTTP_TIMEOUT_OFFSET 36u
 #define HTTP_BUFFER_OFFSET 48u
 #define HTTP_BUFFER_SIZE_OFFSET 52u
+#define HTTP_SINK_OFFSET 60u
+#define HTTP_SINK_ARG_OFFSET 64u
 #define HTTP_STATUS_OFFSET 96u
 #define HTTP_WORK_STATE_OFFSET 108u
 #define HTTP_READY_OFFSET 112u
+
+#define ERR_INVAL (-22)
 
 #ifndef AP01_OBSERVER_URL_PREFIX
 #error AP01_OBSERVER_URL_PREFIX must be supplied by the offline build
@@ -221,6 +225,19 @@ static void collect_object(struct observer_state *state, void *object, u8 depth,
   }
 }
 
+static ATTR_NOINLINE int discard_response_sink(char **buffer, int offset,
+                                                int data_end,
+                                                int *buffer_length,
+                                                void *argument)
+{
+  (void)argument;
+  if (buffer == (void *)0 || *buffer == (void *)0 ||
+      buffer_length == (void *)0 || offset < 0 || data_end < offset ||
+      *buffer_length < 0 || data_end > *buffer_length)
+    return ERR_INVAL;
+  return 0;
+}
+
 static ATTR_NOINLINE int send_record(struct observer_state *state, struct record *record, u32 index)
 {
   u8 *context = (u8 *)malloc(HTTP_CONTEXT_BYTES);
@@ -264,9 +281,12 @@ static ATTR_NOINLINE int send_record(struct observer_state *state, struct record
   *(u32 *)(context + HTTP_TIMEOUT_OFFSET) = 2u;
   *(void **)(context + HTTP_BUFFER_OFFSET) = response;
   *(u32 *)(context + HTTP_BUFFER_SIZE_OFFSET) = HTTP_RESPONSE_BYTES;
+  *(void **)(context + HTTP_SINK_OFFSET) = (void *)discard_response_sink;
+  *(void **)(context + HTTP_SINK_ARG_OFFSET) = (void *)0;
   context[HTTP_READY_OFFSET] = 1u;
   result = ((webclient_fn)webclient_perform)(context);
   if (result >= 0 && *(u32 *)(context + HTTP_STATUS_OFFSET) != 200u) result = -1;
+  *(void **)(context + HTTP_SINK_ARG_OFFSET) = (void *)0;
   *(void **)(context + HTTP_WORK_STATE_OFFSET) = (void *)0;
   free(response);
   free(context);

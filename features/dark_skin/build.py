@@ -188,7 +188,11 @@ def build(
     if not payload or len(payload) > PAYLOAD_CAPACITY:
         raise ObserverBuildError("观察载荷为空或超过 60,934 字节")
     symbols = _symbols(nm, elf_path)
-    required = ("ap01_dark_skin_ui_timer_wrapper", "ap01_dark_skin_observer_timer")
+    required = (
+        "ap01_dark_skin_ui_timer_wrapper",
+        "ap01_dark_skin_observer_timer",
+        "discard_response_sink",
+    )
     for name in required:
         if name not in symbols or not PAYLOAD_VA <= symbols[name] < PAYLOAD_VA + len(payload):
             raise ObserverBuildError(f"观察载荷符号缺失或越界：{name}")
@@ -207,12 +211,22 @@ def build(
     ensure_position = wrapper.find("<ensure_state>")
     if stock_position < 0 or ensure_position < 0 or stock_position > ensure_position:
         raise ObserverBuildError("包装函数没有先调用原厂 UI 定时函数")
+    source_text = SOURCE.read_text(encoding="utf-8")
     forbidden = (
         "lv_obj_create", "lv_obj_del", "lv_obj_set_", "lv_obj_add_event_cb",
         "lv_obj_add_flag", "lv_obj_remove_flag", "lv_obj_align", "lv_obj_center",
     )
-    if any(name in SOURCE.read_text(encoding="utf-8") for name in forbidden):
+    if any(name in source_text for name in forbidden):
         raise ObserverBuildError("观察源码包含改变对象的 LVGL 调用")
+    required_webclient_contract = (
+        "#define HTTP_RESPONSE_BYTES 4096u",
+        "#define HTTP_SINK_OFFSET 60u",
+        "#define HTTP_SINK_ARG_OFFSET 64u",
+        "(void *)discard_response_sink",
+        "context + HTTP_SINK_ARG_OFFSET",
+    )
+    if any(item not in source_text for item in required_webclient_contract):
+        raise ObserverBuildError("观察程序没有完整复用原厂 webclient 上下文")
 
     stack_lines = object_path.with_suffix(".su").read_text(encoding="utf-8").splitlines()
     stack_sizes: list[int] = []
@@ -274,6 +288,8 @@ def build(
             "maximum_depth": 6,
             "installation_authorized": False,
             "receiver_address_stored_in_manifest": False,
+            "webclient_response_buffer_bytes": 4096,
+            "webclient_response_sink_configured": True,
         },
     }
     _write(output, bytes(candidate), freeze)
