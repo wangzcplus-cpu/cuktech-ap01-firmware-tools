@@ -4,11 +4,6 @@ typedef unsigned int u32;
 #define ATTR_ENTRY __attribute__((section(".text.entry"), noinline, used))
 #define ATTR_NOINLINE __attribute__((noinline))
 
-#define TIMER_BYTES 0x58u
-#define FIRST_DELAY_MS 2000u
-#define REPEAT_DELAY_MS 2000u
-#define TIMER_PROBE_LIMIT 64u
-#define LOOP_GLOBAL 0x62FCA9A8u
 #define HTTP_CONTEXT_BYTES 116u
 #define HTTP_RESPONSE_BYTES 4096u
 #define HTTP_URL_OFFSET 8u
@@ -21,6 +16,9 @@ typedef unsigned int u32;
 #define HTTP_READY_OFFSET 112u
 
 #define ERR_INVAL (-22)
+#define AP01_O_RDONLY 1
+#define AP01_O_RDWR_CREAT_TRUNC 39
+#define AP01_MODE_0666 438
 
 #ifndef AP01_OBSERVER_URL_PREFIX
 #error AP01_OBSERVER_URL_PREFIX must be supplied by the offline build
@@ -28,24 +26,24 @@ typedef unsigned int u32;
 
 typedef void (*one_arg_fn)(void *);
 typedef int (*webclient_fn)(void *);
-typedef void (*timer_init_fn)(void *, void *);
-typedef int (*timer_schedule_fn)(void *, void *, u32, u32, u32, u32);
+typedef int (*open_fn)(const char *, int, int);
+typedef int (*close_fn)(int);
 typedef void *(*malloc_fn)(u32);
 typedef void (*free_fn)(void *);
 
 extern void stock_ui_timer(void *);
 extern int webclient_perform(void *);
-extern void stock_timer_init(void *, void *);
-extern int stock_timer_schedule(void *, void *, u32, u32, u32, u32);
+extern int open(const char *, int, int);
+extern int close(int);
 extern void *malloc(u32);
 extern void free(void *);
 
-void ap01_dark_skin_observer_timer(void *handle);
-
 static const char http_method[] = "GET";
+static const char probe_marker_path[] =
+  "/tmp/.ap01-dark-skin-wrapper-probe-v5";
 static const char probe_url[] =
   AP01_OBSERVER_URL_PREFIX
-  "seq=0&page=-1&index=0&count=0&depth=0&path=root"
+  "seq=0&page=-2&index=0&count=0&depth=0&path=wrapper"
   "&object=0x00000000&class=0x00000000&flags=0x00000000"
   "&styles=0x00000000&user_data=0x00000000&x=0&y=0&w=0&h=0"
   "&children=0&truncated=0";
@@ -56,36 +54,18 @@ static void zero_bytes(void *target, u32 length)
   while (length-- != 0u) *selected++ = 0u;
 }
 
-static ATTR_NOINLINE void *timer_loop(void)
+static ATTR_NOINLINE int claim_wrapper_probe(void)
 {
-  volatile u8 *global = (volatile u8 *)LOOP_GLOBAL;
-  if (global[8] != 0x0du) return (void *)0;
-  return *(void * volatile *)(global + 4u);
-}
-
-static ATTR_NOINLINE void ensure_probe_timer(void)
-{
-  void *loop = timer_loop();
-  void *node;
-  void *timer;
-  u32 hops;
-  if (loop == (void *)0) return;
-  node = *(void **)((u8 *)loop + 0x0cu);
-  for (hops = 0u;
-       hops < TIMER_PROBE_LIMIT && node != (void *)((u8 *)loop + 8u);
-       ++hops) {
-    u8 *handle = (u8 *)node - 0x10u;
-    if (handle[8] == 0x0du &&
-        *(void **)(handle + 0x30u) == (void *)ap01_dark_skin_observer_timer)
-      return;
-    node = *(void **)((u8 *)node + 4u);
+  int descriptor = ((open_fn)open)(probe_marker_path, AP01_O_RDONLY, 0);
+  if (descriptor >= 0) {
+    (void)((close_fn)close)(descriptor);
+    return 0;
   }
-  timer = ((malloc_fn)malloc)(TIMER_BYTES);
-  if (timer == (void *)0) return;
-  ((timer_init_fn)stock_timer_init)(loop, timer);
-  (void)((timer_schedule_fn)stock_timer_schedule)(
-      timer, (void *)ap01_dark_skin_observer_timer,
-      FIRST_DELAY_MS, 0u, 0u, 0u);
+  descriptor = ((open_fn)open)(
+      probe_marker_path, AP01_O_RDWR_CREAT_TRUNC, AP01_MODE_0666);
+  if (descriptor < 0) return 0;
+  (void)((close_fn)close)(descriptor);
+  return 1;
 }
 
 static ATTR_NOINLINE int discard_response_sink(char **buffer, int offset,
@@ -130,17 +110,8 @@ static ATTR_NOINLINE int send_startup_probe(void)
   return result;
 }
 
-ATTR_NOINLINE __attribute__((used)) void ap01_dark_skin_observer_timer(void *handle)
-{
-  if (handle == (void *)0) return;
-  (void)send_startup_probe();
-  (void)((timer_schedule_fn)stock_timer_schedule)(
-      handle, (void *)ap01_dark_skin_observer_timer,
-      REPEAT_DELAY_MS, 0u, 0u, 0u);
-}
-
 ATTR_ENTRY void ap01_dark_skin_ui_timer_wrapper(void *timer)
 {
-  ensure_probe_timer();
   ((one_arg_fn)stock_ui_timer)(timer);
+  if (claim_wrapper_probe()) (void)send_startup_probe();
 }

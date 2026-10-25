@@ -33,24 +33,30 @@ class ReceiverTest(unittest.TestCase):
         self.assertIn("(void *)discard_response_sink", source)
         self.assertIn("context + HTTP_SINK_ARG_OFFSET) = (void *)context", source)
 
-    def test_observer_is_a_pure_startup_probe(self) -> None:
+    def test_observer_is_a_one_shot_wrapper_probe(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
-        self.assertIn("#define TIMER_BYTES 0x58u", source)
-        self.assertIn("#define FIRST_DELAY_MS 2000u", source)
-        self.assertIn("malloc)(TIMER_BYTES)", source)
-        self.assertIn('"seq=0&page=-1&index=0&count=0&depth=0&path=root"', source)
+        self.assertIn('"/tmp/.ap01-dark-skin-wrapper-probe-v5"', source)
+        self.assertIn("AP01_O_RDWR_CREAT_TRUNC", source)
+        self.assertIn("claim_wrapper_probe()", source)
+        self.assertIn('"seq=0&page=-2&index=0&count=0&depth=0&path=wrapper"', source)
         self.assertIn("send_startup_probe();", source)
         for forbidden in (
             "struct observer_state", "struct record", "MAX_OBJECTS", "MAX_DEPTH",
             "stock_get_dispatch_index", "stock_get_child", "lv_obj_get_child",
             "lv_obj_get_child_count", "count_objects", "resolve_object", "advance_path",
+            "LOOP_GLOBAL", "TIMER_BYTES", "stock_timer_init", "stock_timer_schedule",
+            "ap01_dark_skin_observer_timer", "timer_loop", "ensure_probe_timer",
         ):
             self.assertNotIn(forbidden, source)
 
-    def test_timer_is_ensured_before_stock_ui_timer(self) -> None:
+    def test_stock_ui_timer_runs_before_wrapper_probe(self) -> None:
         source = SOURCE.read_text(encoding="utf-8")
         wrapper = source.split("ATTR_ENTRY void ap01_dark_skin_ui_timer_wrapper", 1)[1]
-        self.assertLess(wrapper.find("ensure_probe_timer();"), wrapper.find("stock_ui_timer)(timer)"))
+        stock = wrapper.find("stock_ui_timer)(timer)")
+        claim = wrapper.find("claim_wrapper_probe()")
+        probe = wrapper.find("send_startup_probe()")
+        self.assertLess(stock, claim)
+        self.assertLess(claim, probe)
 
 
 if __name__ == "__main__":

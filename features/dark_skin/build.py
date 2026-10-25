@@ -190,7 +190,7 @@ def build(
     symbols = _symbols(nm, elf_path)
     required = (
         "ap01_dark_skin_ui_timer_wrapper",
-        "ap01_dark_skin_observer_timer",
+        "claim_wrapper_probe",
         "discard_response_sink",
     )
     for name in required:
@@ -207,10 +207,14 @@ def build(
         raise ObserverBuildError("观察载荷仍有未处理重定位")
     wrapper = disassembly.split("<ap01_dark_skin_ui_timer_wrapper>:", 1)[1]
     wrapper = wrapper.split("\n\n", 1)[0]
-    ensure_position = wrapper.find("<ensure_probe_timer>")
     stock_position = wrapper.find("<stock_ui_timer>")
-    if stock_position < 0 or ensure_position < 0 or ensure_position > stock_position:
-        raise ObserverBuildError("包装函数没有先确保独立观察定时器，再调用原厂 UI 定时函数")
+    claim_position = wrapper.find("<claim_wrapper_probe>")
+    probe_position = wrapper.find("<send_startup_probe>")
+    if (
+        stock_position < 0 or claim_position < 0 or probe_position < 0 or
+        not stock_position < claim_position < probe_position
+    ):
+        raise ObserverBuildError("包装函数没有先调用原厂 UI 定时函数，再执行一次性直接探针")
     source_text = SOURCE.read_text(encoding="utf-8")
     forbidden = (
         "lv_obj_create", "lv_obj_del", "lv_obj_set_", "lv_obj_add_event_cb",
@@ -222,19 +226,29 @@ def build(
         "struct observer_state", "struct record", "MAX_OBJECTS", "MAX_DEPTH",
         "stock_get_dispatch_index", "stock_get_child", "lv_obj_get_child",
         "lv_obj_get_child_count", "count_objects", "resolve_object", "advance_path",
+        "LOOP_GLOBAL", "TIMER_BYTES", "stock_timer_init", "stock_timer_schedule",
+        "ap01_dark_skin_observer_timer", "timer_loop", "ensure_probe_timer",
     )
     if any(item in source_text for item in forbidden_object_tree):
-        raise ObserverBuildError("纯启动探针仍包含页面识别、对象树或观察状态")
+        raise ObserverBuildError("包装函数直连探针仍包含定时器、对象树或观察状态")
     required_probe_contract = (
-        "#define TIMER_BYTES 0x58u",
-        "#define FIRST_DELAY_MS 2000u",
-        "malloc)(TIMER_BYTES)",
+        '"/tmp/.ap01-dark-skin-wrapper-probe-v5"',
+        "AP01_O_RDWR_CREAT_TRUNC",
+        "AP01_MODE_0666",
+        "claim_wrapper_probe()",
         "static const char probe_url[]",
-        '"seq=0&page=-1&index=0&count=0&depth=0&path=root"',
+        '"seq=0&page=-2&index=0&count=0&depth=0&path=wrapper"',
         "send_startup_probe();",
     )
     if any(item not in source_text for item in required_probe_contract):
-        raise ObserverBuildError("观察程序缺少严格 0x58 字节定时器或固定启动探针")
+        raise ObserverBuildError("观察程序缺少一次性标记或固定包装函数探针")
+    linker_text = LINKER.read_text(encoding="utf-8")
+    required_file_contract = (
+        "PROVIDE(open = 0xA003F448);",
+        "PROVIDE(close = 0xA0026788);",
+    )
+    if any(item not in linker_text for item in required_file_contract):
+        raise ObserverBuildError("一次性标记没有使用已验证的原厂 open/close 地址")
     required_webclient_contract = (
         "#define HTTP_RESPONSE_BYTES 4096u",
         "#define HTTP_SINK_OFFSET 60u",
@@ -273,7 +287,7 @@ def build(
     manifest = output.with_suffix(".manifest.json")
     report = {
         "schema_version": 1,
-        "artifact_type": "ap01-read-only-startup-probe",
+        "artifact_type": "ap01-read-only-wrapper-probe",
         "built_at_beijing": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds"),
         "target": {"model": AP01_1_0_2_0031.model, "version": AP01_1_0_2_0031.version},
         "baseline": baseline_report.to_dict(),
@@ -298,14 +312,15 @@ def build(
             "read_only": freeze,
         },
         "safety": {
-            "observer_timer_ensured_before_stock_ui_timer": True,
             "object_mutation_calls_absent": True,
             "network_timeout_seconds": 2,
-            "persistent_timer_bytes": 88,
             "observer_state_absent": True,
             "object_tree_calls_absent": True,
-            "startup_probe_page": -1,
-            "pure_startup_probe": True,
+            "timer_calls_absent": True,
+            "stock_ui_timer_called_before_probe": True,
+            "volatile_marker_path": "/tmp/.ap01-dark-skin-wrapper-probe-v5",
+            "wrapper_probe_page": -2,
+            "one_shot_wrapper_probe": True,
             "installation_authorized": False,
             "receiver_address_stored_in_manifest": False,
             "webclient_response_buffer_bytes": 4096,
